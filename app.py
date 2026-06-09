@@ -217,13 +217,19 @@ def export_text_to_pdf(text_content: str) -> bytes:
         # Fallback to plain text bytes
         return text_content.encode('utf-8', errors='ignore')
 
-# Session states initialization
-if "regenerated_text" not in st.session_state:
-    st.session_state.regenerated_text = ""
+# Persistent Session states dictionary mapping URLs to their rewritten outputs
+if "regenerated_articles" not in st.session_state:
+    st.session_state.regenerated_articles = {}
 
 run_analysis = st.sidebar.button("Execute Verification Diagnostics", type="primary", use_container_width=True)
 
-if run_analysis or st.session_state.regenerated_text:
+# Clear old rewrites on fresh runs
+if run_analysis:
+    st.session_state.regenerated_articles = {}
+
+has_articles_in_state = bool(st.session_state.get("regenerated_articles", {}))
+
+if run_analysis or has_articles_in_state:
     if not target_url:
         st.warning("⚠️ Enter a valid domain/entrypoint in the sidebar console to initiate evaluations.")
     else:
@@ -248,15 +254,15 @@ if run_analysis or st.session_state.regenerated_text:
                 st.markdown("#### Dynamic Webpage Humanization & PDF Compilation")
                 st.write("Rewrites the crawled document layout using the AI model and allows instant PDF exports.")
                 
-                col_actions_a, col_actions_b = st.columns([1, 2])
-                with col_actions_a:
-                    trigger_regen = st.button("🔄 Regenerate Article (Humanized)", use_container_width=True)
-                
-                # FIX: Explicitly handle None return from selectbox to satisfy Pylance
+                # Handle selection variables
                 selected_url_main_raw = st.selectbox("Select target page node for workspace actions:", page_urls, key="workspace_selector")
                 selected_url_main = str(selected_url_main_raw) if selected_url_main_raw else ""
                 
                 selected_page_main = next(p for p in pages_data if p["url"] == selected_url_main)
+                
+                col_actions_a, col_actions_b = st.columns([1, 2])
+                with col_actions_a:
+                    trigger_regen = st.button("🔄 Regenerate Article (Humanized)", use_container_width=True)
                 
                 if trigger_regen:
                     if not gemini_key:
@@ -264,12 +270,17 @@ if run_analysis or st.session_state.regenerated_text:
                     else:
                         with st.spinner("Rewriting entire webpage structure to maximize human stylometric variance..."):
                             regen_result = humanize_article_with_gemini(selected_page_main["text"])
-                            st.session_state.regenerated_text = regen_result
+                            # Save specifically to the current URL key
+                            st.session_state.regenerated_articles[selected_url_main] = regen_result
                             st.success("Article successfully rewritten!")
-                            
-                if st.session_state.regenerated_text:
-                    st.text_area("Regenerated Article Workspace", value=st.session_state.regenerated_text, height=200)
-                    pdf_bytes = export_text_to_pdf(st.session_state.regenerated_text)
+                            st.rerun()  # Forces immediate redraw of the text area and PDF download button
+                
+                # Safely render workspace only if this specific URL has been generated
+                current_regen_content = st.session_state.regenerated_articles.get(selected_url_main, "")
+                
+                if current_regen_content:
+                    st.text_area("Regenerated Article Workspace", value=current_regen_content, height=200)
+                    pdf_bytes = export_text_to_pdf(current_regen_content)
                     st.download_button(
                         label="📥 Download Regenerated Article as PDF",
                         data=pdf_bytes,
@@ -291,7 +302,7 @@ if run_analysis or st.session_state.regenerated_text:
                 with st.container(border=True):
                     st.metric(label="Web Spider Processing Time", value=f"{crawl_metrics['execution_time_seconds']}s")
                 
-            # FIX: Explicitly handle None return from selectbox to satisfy Pylance
+            # Explicitly handle None return from selectbox to satisfy Pylance
             selected_url_raw = st.selectbox("Select target page node from crawl graph for details:", page_urls, key="details_selector")
             selected_url = str(selected_url_raw) if selected_url_raw else ""
             
@@ -446,8 +457,10 @@ if run_analysis or st.session_state.regenerated_text:
                         else:
                             with st.spinner("Injecting organic stylometric cadence..."):
                                 human_result = humanize_article_with_gemini(selected_page["text"])
-                                st.session_state.regenerated_text = human_result
+                                # Save directly to active key and refresh
+                                st.session_state.regenerated_articles[selected_url] = human_result
                                 st.success("Article successfully humanized and loaded to Workspace above!")
+                                st.rerun()
 
             # --- STYLOMETRIC RADAR CHART & HEATMAP GRID ---
             st.markdown("<h3 class='section-header'>🕵️ Structural Forensics & Linguistic Layout</h3>", unsafe_allow_html=True)
