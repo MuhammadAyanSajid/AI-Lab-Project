@@ -3,7 +3,9 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import google.generativeai as genai
+import urllib.parse
 from collections import Counter
+from bs4 import BeautifulSoup
 from search_crawler import run_smart_website_crawler
 from ml_classifier import analyze_text_authenticity
 from logic_expert import extract_document_metadata, run_logic_inference_engine
@@ -95,7 +97,7 @@ gemini_key = st.sidebar.text_input(
 )
 
 if gemini_key:
-    genai.configure(api_key=gemini_key)
+    genai.configure(api_key=gemini_key)  # type: ignore
 
 st.sidebar.markdown("""
 ---
@@ -105,20 +107,24 @@ st.sidebar.markdown("""
 3. **FOL Expert (Logic AI):** Checks metadata landmarks (DOI, citations).
 """)
 
-# --- HELPER FUNCTIONS FOR GEMINI ---
+# --- HELPER FUNCTIONS ---
 def call_gemini_api(prompt: str) -> str:
     """Safely queries Gemini model with standard fallback handling."""
     if not gemini_key:
         return "Configure your Gemini API key in the sidebar to activate this feature."
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash")  # type: ignore
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
         return f"Error executing Gemini query: {str(e)}"
 
 def generate_gemini_summary(text: str) -> str:
-    prompt = f"Analyze the following document text and provide an executive summary of exactly 5 bullet points or lines. Keep it professional:\n\n{text[:8000]}"
+    prompt = (
+        "Analyze the following text and generate an extremely simple, concise, and easy-to-understand executive summary. "
+        "Your output must consist of exactly 5 bullet points. Each bullet point must be a single, short sentence "
+        "written in clear, plain English. Avoid technical jargon, complex metaphors, or dense phrasing:\n\n" + text[:8000]
+    )
     return call_gemini_api(prompt)
 
 def humanize_article_with_gemini(text: str) -> str:
@@ -145,14 +151,52 @@ def extract_keywords_gemini(text: str) -> list:
         return extract_keywords_fallback(text)
     return [term.strip() for term in result.split(",") if term.strip()]
 
+def extract_page_links(raw_html: str, current_url: str) -> str:
+    """Extracts, resolves, and formats all external hyperlinks found on the page for clean copying."""
+    soup = BeautifulSoup(raw_html, "html.parser")
+    links = []
+    for anchor in soup.find_all("a", href=True):
+        href = anchor.get("href")
+        if href and isinstance(href, str):
+            full_url = urllib.parse.urljoin(current_url, href)
+            # Retain valid HTTP/S links and remove duplicates
+            if full_url.startswith("http") and full_url not in links:
+                links.append(full_url)
+    if not links:
+        return "No reference links detected on this page."
+    return "\n".join(links)
+
+def generate_all_citations(url: str, text: str) -> str:
+    """Generates bibliographic citations across APA, MLA, Chicago, and BibTeX in a single call."""
+    prompt = (
+        f"Based on the following document context, generate bibliographic citations for this source "
+        f"in all of these four formats: APA, MLA, Chicago, and BibTeX. "
+        f"Format each format clearly with uppercase headers (e.g. === APA STYLE ===).\n"
+        f"Url: {url}\n\nContent Snippet:\n{text[:2500]}"
+    )
+    return call_gemini_api(prompt)
+
+def audit_logical_fallacies(text: str) -> str:
+    """Scans the text for logical fallacies, methodological bias, or scientific overreaches."""
+    prompt = (
+        "Analyze the following research text for logical fallacies, cognitive biases, or scientific overreaches. "
+        "For each issue identified:\n"
+        "1. Fallacy/Bias Name: (e.g., Correlation vs Causation, Hasty Generalization, Appeal to Authority)\n"
+        "2. Detailed Explanation: A simple, plain-English description of why this is a logical fallacy and how it weakens the argument.\n"
+        "3. Text Context: Cite or describe where this pattern occurs in the text.\n\n"
+        "Provide exactly 3 critical findings, formatted in clear Markdown. Keep your explanations highly detailed yet incredibly easy to understand.\n\n"
+        f"Text Snippet:\n{text[:6000]}"
+    )
+    return call_gemini_api(prompt)
+
 def export_text_to_pdf(text_content: str) -> bytes:
     """Generates PDF cleanly. Falls back to plain text bytes if FPDF is not installed."""
     try:
-        from fpdf import FPDF
+        from fpdf import FPDF  # type: ignore
         class CleanPDF(FPDF):
             def header(self):
                 self.set_font('Helvetica', 'B', 14)
-                self.cell(0, 10, 'Researchify - Generated Article', ln=True, align='C')
+                self.cell(0, 10, 'Researchify - Humanized Document Export', ln=True, align='C')
                 self.ln(5)
             def footer(self):
                 self.set_y(-15)
@@ -166,7 +210,7 @@ def export_text_to_pdf(text_content: str) -> bytes:
         # Clean text to avoid encoding errors in standard Latin-1 PDF output
         clean_text = text_content.encode('latin-1', 'ignore').decode('latin-1')
         for line in clean_text.split('\n'):
-            pdf.multi_cell(0, 8, txt=line)
+            pdf.multi_cell(0, 8, line)  # Positional text parameter ensures legacy/modern FPDF compatibility
             
         return bytes(pdf.output())
     except Exception:
@@ -201,27 +245,30 @@ if run_analysis or st.session_state.regenerated_text:
             # --- TOP LEVEL WORKSPACE (REGENERATE AT ANY MOMENT) ---
             st.markdown("<h3 class='section-header'>⚡ Researchify Generative Workspace</h3>", unsafe_allow_html=True)
             with st.container(border=True):
-                st.markdown("#### Instantly Rewrite and Export Article")
-                st.write("Generate a humanized draft of the target page at any time and export the result directly as a PDF.")
+                st.markdown("#### Dynamic Webpage Humanization & PDF Compilation")
+                st.write("Rewrites the crawled document layout using the AI model and allows instant PDF exports.")
                 
                 col_actions_a, col_actions_b = st.columns([1, 2])
                 with col_actions_a:
                     trigger_regen = st.button("🔄 Regenerate Article (Humanized)", use_container_width=True)
                 
-                selected_url_main = st.selectbox("Select target page node for workspace actions:", page_urls, key="workspace_selector")
+                # FIX: Explicitly handle None return from selectbox to satisfy Pylance
+                selected_url_main_raw = st.selectbox("Select target page node for workspace actions:", page_urls, key="workspace_selector")
+                selected_url_main = str(selected_url_main_raw) if selected_url_main_raw else ""
+                
                 selected_page_main = next(p for p in pages_data if p["url"] == selected_url_main)
                 
                 if trigger_regen:
                     if not gemini_key:
                         st.error("Please enter a Google Gemini API Key in the sidebar to activate writing capabilities.")
                     else:
-                        with st.spinner("Rewriting article to maximize human stylistic variance..."):
+                        with st.spinner("Rewriting entire webpage structure to maximize human stylometric variance..."):
                             regen_result = humanize_article_with_gemini(selected_page_main["text"])
                             st.session_state.regenerated_text = regen_result
                             st.success("Article successfully rewritten!")
                             
                 if st.session_state.regenerated_text:
-                    st.text_area("Regenerated Content Preview", value=st.session_state.regenerated_text, height=200)
+                    st.text_area("Regenerated Article Workspace", value=st.session_state.regenerated_text, height=200)
                     pdf_bytes = export_text_to_pdf(st.session_state.regenerated_text)
                     st.download_button(
                         label="📥 Download Regenerated Article as PDF",
@@ -244,7 +291,10 @@ if run_analysis or st.session_state.regenerated_text:
                 with st.container(border=True):
                     st.metric(label="Web Spider Processing Time", value=f"{crawl_metrics['execution_time_seconds']}s")
                 
-            selected_url = st.selectbox("Select target page node from crawl graph for details:", page_urls, key="details_selector")
+            # FIX: Explicitly handle None return from selectbox to satisfy Pylance
+            selected_url_raw = st.selectbox("Select target page node from crawl graph for details:", page_urls, key="details_selector")
+            selected_url = str(selected_url_raw) if selected_url_raw else ""
+            
             selected_page = next(p for p in pages_data if p["url"] == selected_url)
             
             # Execute downstream forensics
@@ -358,10 +408,20 @@ if run_analysis or st.session_state.regenerated_text:
                     st.markdown("<h4 style='margin-top: 0; color: #38BDF8;'>📋 Executive Summary (Exactly 5 Lines)</h4>", unsafe_allow_html=True)
                     if not gemini_key:
                         st.info("💡 Provide a Gemini API key in the sidebar to generate a 5-line executive summary of this article.")
+                        summary_display = "Configure your Gemini API key in the sidebar to activate this feature."
                     else:
                         with st.spinner("Drafting executive abstract..."):
-                            summary_text = generate_gemini_summary(selected_page["text"])
-                            st.markdown(summary_text)
+                            summary_display = generate_gemini_summary(selected_page["text"])
+                        st.markdown(summary_display)
+                    
+                    # Copyable Summary Box
+                    st.markdown("<h5 style='color: #64748B;'>📥 Copyable Summary</h5>", unsafe_allow_html=True)
+                    st.text_area(
+                        label="Copyable Executive Summary Output Console", 
+                        value=summary_display, 
+                        height=120, 
+                        label_visibility="collapsed"
+                    )
 
             # --- WARNING AND HUMANIZER BLOCK (UNDER 50% THRESHOLD) ---
             if logic_results["final_trust_score"] < 50:
@@ -465,40 +525,67 @@ if run_analysis or st.session_state.regenerated_text:
                     </div>
                     """, unsafe_allow_html=True)
 
-            # --- EXPANDED RESEARCH ASSISTANT UTILITIES: CITATIONS & FALLACY SCANNER ---
+            # --- EXPANDED RESEARCH ASSISTANT UTILITIES: ALL-IN-ONE CITATIONS, LINK EXTRACTION & DETAILED FALLACY SCANNER ---
             st.markdown("<h3 class='section-header'>🔬 Scholarly Forensics Workbench</h3>", unsafe_allow_html=True)
             col_util_left, col_util_right = st.columns([1, 1])
             
             with col_util_left:
                 with st.container(border=True):
-                    st.markdown("<h4 style='margin-top: 0; color: #38BDF8;'>📝 Academic Citation Generator</h4>", unsafe_allow_html=True)
-                    citation_format = st.selectbox("Select Citation Schema:", ["APA", "MLA", "Chicago", "BibTeX"])
+                    st.markdown("<h4 style='margin-top: 0; color: #38BDF8;'>📝 All Academic Citations</h4>", unsafe_allow_html=True)
+                    st.write("Bibliographic indexing generated simultaneously across APA, MLA, Chicago, and BibTeX styles:")
                     
                     if not gemini_key:
-                        st.info("💡 Provide a Gemini API key to generate formatted citation codes.")
+                        citations_output = "Configure your Gemini API key in the sidebar to generate formatted citation codes."
+                        st.info("💡 Provide a Gemini API key to generate citation indexes.")
                     else:
-                        citation_prompt = (
-                            f"Generate a clean academic bibliographic citation in exactly {citation_format} format "
-                            f"using the metadata of this source. URL: {selected_url}\nText Snippet: {selected_page['text'][:2000]}"
-                        )
-                        with st.spinner("Generating citation..."):
-                            citation_output = call_gemini_api(citation_prompt)
-                        st.code(citation_output, language="text")
+                        with st.spinner("Generating citations schema..."):
+                            citations_output = generate_all_citations(selected_url, selected_page["text"])
+                        st.code(citations_output, language="text")
+                    
+                    # Copyable Citations Box
+                    st.markdown("<h5 style='color: #64748B;'>📥 Copyable Citation Text</h5>", unsafe_allow_html=True)
+                    st.text_area(
+                        label="Copyable Citations Output Console", 
+                        value=citations_output, 
+                        height=130, 
+                        label_visibility="collapsed"
+                    )
+                
+                with st.container(border=True):
+                    st.markdown("<h4 style='margin-top: 0; color: #38BDF8;'>🔗 Extracted Reference Links Box</h4>", unsafe_allow_html=True)
+                    st.write("All active external reference hyperlinks identified within the source web structure:")
+                    
+                    extracted_links = extract_page_links(selected_page["html"], selected_url)
+                    
+                    # Copyable Links Box
+                    st.text_area(
+                        label="Copyable Reference Links Output Console", 
+                        value=extracted_links, 
+                        height=150, 
+                        label_visibility="collapsed"
+                    )
                         
             with col_util_right:
                 with st.container(border=True):
                     st.markdown("<h4 style='margin-top: 0; color: #38BDF8;'>🔍 Fallacy & Scientific Bias Scanner</h4>", unsafe_allow_html=True)
+                    st.write("In-depth analysis scanning the document for cognitive biases, logical arguments, and structural flaws:")
+                    
                     if not gemini_key:
+                        fallacies_output = "Configure your Gemini API key in the sidebar to run logical evaluations."
                         st.info("💡 Provide a Gemini API key to check logical arguments and identify potential research biases.")
                     else:
-                        bias_prompt = (
-                            "Carefully analyze this scientific text for cognitive biases, logical fallacies "
-                            "(such as correlation/causation confusion or hasty generalizations), or potential conflicts "
-                            f"of interest. Limit the output to 3 critical findings:\n\n{selected_page['text'][:4000]}"
-                        )
-                        with st.spinner("Auditing research arguments..."):
-                            bias_output = call_gemini_api(bias_prompt)
-                        st.markdown(bias_output)
+                        with st.spinner("Auditing research arguments for logical anomalies..."):
+                            fallacies_output = audit_logical_fallacies(selected_page["text"])
+                        st.markdown(fallacies_output)
+                    
+                    # Copyable Fallacy Box
+                    st.markdown("<h5 style='color: #64748B;'>📥 Copyable Fallacy Audit</h5>", unsafe_allow_html=True)
+                    st.text_area(
+                        label="Copyable Fallacies Output Console", 
+                        value=fallacies_output, 
+                        height=180, 
+                        label_visibility="collapsed"
+                    )
                 
             # --- EVALUATION METRICS AND INTERFACE LOG TABS ---
             st.markdown("<h3 class='section-header'>📊 Technical Metrics & System Diagnostics</h3>", unsafe_allow_html=True)
